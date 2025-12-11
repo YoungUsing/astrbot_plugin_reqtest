@@ -3,20 +3,45 @@
 import asyncio
 import re
 import time
-from asyncio import Queue
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
+from itertools import chain
 from pathlib import Path
+
+import aiofiles
 
 from astrbot.api import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import At, Forward, Image, Node, Nodes, Record, Video
+from astrbot.core.message.components import (
+    At,
+    BaseMessageComponent,
+    Forward,
+    Image,
+    Node,
+    Nodes,
+    Plain,
+    Record,
+    Video,
+)
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .core.clean import CacheCleaner
 from .core.download import Downloader
-from .core.parsers import BaseParser, BilibiliParser, ParseResult, YouTubeParser
+from .core.exception import DownloadException, DownloadLimitException, ZeroSizeException
+from .core.parsers import (
+    AudioContent,
+    BaseParser,
+    BilibiliParser,
+    DynamicContent,
+    GraphicsContent,
+    ImageContent,
+    ParseResult,
+    VideoContent,
+    YouTubeParser,
+)
 from .core.render import CommonRenderer
 from .core.utils import save_cookies_with_netscape
 
@@ -114,6 +139,64 @@ class ParserPlugin(Star):
                 return parser
         raise ValueError(f"未找到类型为 {parser_type} 的 parser 实例")
 
+    async def make_messages(self, result: ParseResult) -> list[BaseMessageComponent]:
+        """组装消息"""
+        segs: list[BaseMessageComponent] = []
+
+        # 1.获取媒体内容
+        failed = 0
+
+        for cont in chain(
+            result.contents, result.repost.contents if result.repost else ()
+        ):
+            try:
+                path = await cont.get_path()
+            except (DownloadLimitException, ZeroSizeException):
+                continue  # 预期异常，不抛出
+            except DownloadException:
+                failed += 1
+                continue
+
+            match cont:
+                case VideoContent() | DynamicContent():
+                    segs.append(Video(str(path)))
+                case AudioContent():
+                    segs.append(Record(str(path)))
+                case ImageContent():
+                    segs.append(Image(str(path)))
+                case GraphicsContent() as g:
+                    segs.append(Image(str(path)))
+                    if g.text:
+                        segs.append(Plain(g.text))
+                    if g.alt:
+                        segs.append(Plain(g.alt))
+
+        # 2. 生成帖子卡片
+        need_card = not self.config["simple_mode"] or not segs
+        if need_card and result.render_image is None:
+            cache_key = uuid.uuid4().hex
+            cache_file = self.cache_dir / f"card_{cache_key}.png"
+            try:
+                image = await self.renderer.create_card_image(result)
+                output = BytesIO()
+                await asyncio.to_thread(image.save, output, format="PNG")
+                async with aiofiles.open(cache_file, "wb+") as f:
+                    await f.write(output.getvalue())
+                result.render_image = cache_file
+            except Exception:
+                result.render_image = None
+
+        # 3.插入卡片
+        if result.render_image is not None:
+            card_seg = Image(str(result.render_image))
+            segs.insert(0, card_seg)
+
+        # 4. 下载失败提示
+        if failed:
+            segs.append(Plain(f"{failed} 项媒体下载失败"))
+
+        return segs
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """消息的统一入口"""
@@ -131,8 +214,9 @@ class ParserPlugin(Star):
             return
 
         # 专门@其他bot的消息不解析
+        self_id = event.get_self_id()
         seg1 = chain[0]
-        if isinstance(seg1, At) and seg1.qq != event.get_self_id():
+        if isinstance(seg1, At) and str(seg1.qq) != self_id:
             return
 
         # 匹配 (关键词 + 正则双重判定)
@@ -175,62 +259,42 @@ class ParserPlugin(Star):
 
         # 抢断机制
         if self.config["enable_tackle"]:
-            if any(
-                isinstance(seg, Video | Record | Nodes | Node | Forward)
-                for seg in chain
-            ):
+            if any(isinstance(seg, Video | Record | Nodes | Node | Forward) for seg in chain):
                 old_task = self.running_tasks.pop(umo, None)
                 if old_task and not old_task.done():
                     old_task.cancel()
-                    logger.warning(
-                        f"[抢断机制] 检测到媒体消息，已取消会话 {umo} 的解析任务"
-                    )
+                    logger.warning(f"[抢断机制] 检测到媒体消息，已取消会话 {umo} 的解析任务")
                 return
 
-        # 创建队列和协程任务
-        queue: Queue = Queue()
-        coro = self._do_parse(event, keyword, searched, umo, queue)
-        task = asyncio.create_task(coro)
+        async def job() -> list[BaseMessageComponent]:
+            parse_res = await self.parser_map[keyword].parse(keyword, searched)  # 解析
+            return await self.make_messages(parse_res) # 渲染
+
+        # 任务
+        task = asyncio.create_task(job())
         self.running_tasks[umo] = task
-
-        # 实时从队列拿数据并 yield
         try:
-            while True:
-                item = await queue.get()
-                if item is None:  # 结束标志
-                    break
-                yield item  # 逐条实时发给框架
+            segs = await task  # 这里可能被 cancel
         except asyncio.CancelledError:
-            return  # 如果被外部取消，也停止转发
+            logger.debug(f"解析/渲染任务被取消 - {umo}")
+            return
         finally:
-            task.cancel()
             self.running_tasks.pop(umo, None)
 
-    async def _do_parse(
-        self,
-        event: AstrMessageEvent,
-        keyword: str,
-        searched: re.Match,
-        umo: str,
-        queue: Queue,
-    ) -> None:
-        """
-        普通协程，可被 create_task 调度；
-        实时把每条链结果 put 进队列，外部实时 get 并 yield。
-        """
-        try:
-            parser = self.parser_map[keyword]
-            parse_res: ParseResult = await parser.parse(keyword, searched)
+        # 合并转发
+        if len(segs) >= self.config["forward_threshold"]:
+            nodes = Nodes([])
+            name = "解析器"
+            for seg in segs:
+                node = Node(uin=self_id, name=name, content=[seg])
+                nodes.nodes.append(node)
+            segs.clear()
+            segs.append(nodes)
 
-            async for chain in self.renderer.render_messages(parse_res):
-                await queue.put(event.chain_result(chain))  # type: ignore
-                await asyncio.sleep(0)  # 让出事件循环，使 cancel 更及时
-        except asyncio.CancelledError:
-            logger.debug(f"解析协程被取消 - {umo}")
-            raise
-        finally:
-            await queue.put(None)  # 告诉消费者“没数据了”
-            self.running_tasks.pop(umo, None)
+        # 发送消息
+        if segs:
+            yield event.chain_result(segs)
+
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bm")
