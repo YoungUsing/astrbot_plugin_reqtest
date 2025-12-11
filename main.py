@@ -12,6 +12,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import (
     At,
+    BaseMessageComponent,
     Forward,
     Image,
     Node,
@@ -189,7 +190,7 @@ class ParserPlugin(Star):
                     logger.warning(f"[抢断机制] 检测到媒体消息，已取消会话 {umo} 的解析任务")
                 return
 
-        async def job() -> list:
+        async def job() -> list[BaseMessageComponent]:
             parse_res = await self.parser_map[keyword].parse(keyword, searched)  # 解析
             return await self.renderer.render_messages(parse_res) # 渲染
 

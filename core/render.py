@@ -393,9 +393,10 @@ class CommonRenderer:
                     segs.append(Video(str(path)))
                 case AudioContent():
                     segs.append(Record(str(path)))
-                case ImageContent() | GraphicsContent():
+                case ImageContent():
                     segs.append(AstrImage(str(path)))
                 case GraphicsContent() as g:
+                    segs.append(AstrImage(str(path)))
                     if g.text:
                         segs.append(Plain(g.text))
                     if g.alt:
