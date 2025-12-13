@@ -321,7 +321,10 @@ class ParserPlugin(Star):
             segs.append(nodes)
         # 发送
         if segs:
-            await event.send(event.chain_result(segs))
+            try:
+                await event.send(event.chain_result(segs))
+            except Exception as e:
+                logger.error(f"发送消息失败: {e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bm")
