@@ -39,7 +39,7 @@ class BilibiliParser(BaseParser):
         super().__init__(config, downloader)
         self.headers = HEADERS.copy()
         self._credential: Credential | None = None
-        self.max_duration = config["max_duration"]
+        self.max_duration = config["source_max_minute"] * 60
         self.cache_dir = Path(config["cache_dir"])
 
         self.video_quality = getattr(

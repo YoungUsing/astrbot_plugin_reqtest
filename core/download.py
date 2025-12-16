@@ -70,8 +70,8 @@ class Downloader:
         self.config = config
         self.cache_dir = Path(config["cache_dir"])
         self.proxy: str | None = self.config["proxy"] or None
-        self.max_duration: int = config["max_duration"]
-        self.max_size = self.config["max_size"]
+        self.max_duration: int = config["source_max_minute"] * 60
+        self.max_size = self.config["source_max_size"]
         self.headers: dict[str, str] = COMMON_HEADER.copy()
         # 视频信息缓存
         self.info_cache: LimitedSizeDict[str, VideoInfo] = LimitedSizeDict()

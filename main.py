@@ -2,12 +2,12 @@
 
 import asyncio
 import re
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from itertools import chain
 from pathlib import Path
+from typing import Any
 
 import aiofiles
 
@@ -19,7 +19,6 @@ from astrbot.core.message.components import (
     At,
     BaseMessageComponent,
     File,
-    Forward,
     Image,
     Json,
     Node,
@@ -29,6 +28,9 @@ from astrbot.core.message.components import (
     Video,
 )
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
 
 from .core.clean import CacheCleaner
 from .core.data import (
@@ -42,6 +44,7 @@ from .core.data import (
 )
 from .core.download import Downloader
 from .core.exception import DownloadException, DownloadLimitException, ZeroSizeException
+from .core.limit import EmojiLikeArbiter, LinkDebouncer
 from .core.parsers import (
     BaseParser,
     BilibiliParser,
@@ -80,14 +83,18 @@ class ParserPlugin(Star):
         # 下载器
         self.downloader = Downloader(config)
 
-        # 缓存清理器
-        self.cleaner = CacheCleaner(self.context, self.config)
+        # 仲裁器
+        self.arbiter = EmojiLikeArbiter(config)
 
-        # 链接防抖缓存 {session_id: {link_content: timestamp}}
-        self.link_cache: dict[str, dict[str, float]] = {}
+        # 防抖器
+        self.debouncer = LinkDebouncer(config)
 
         # 会话 -> 正在运行的解析任务
         self.running_tasks: dict[str, asyncio.Task] = {}
+
+        # 缓存清理器
+        self.cleaner = CacheCleaner(self.context, self.config)
+
 
     async def initialize(self):
         """加载、重载插件时触发"""
@@ -216,31 +223,20 @@ class ParserPlugin(Star):
         if umo in self.config["disabled_sessions"]:
             return
 
+        # 监听贴表情事件
+        if isinstance(event, AiocqhttpMessageEvent):
+            raw_message: dict[str, Any] = event.message_obj.raw_message.__dict__
+            self.arbiter.record_like(raw_message)
+
         # 消息链
         chain = event.get_messages()
         if not chain:
             return
 
-        # 抢断机制
-        if self.config["enable_tackle"]:
-            if any(
-                isinstance(seg, Video | Record | File | Nodes | Node | Forward)
-                for seg in chain
-            ):
-                old_task = self.running_tasks.pop(umo, None)
-                if old_task and not old_task.done():
-                    old_task.cancel()
-                    sender_name = event.get_sender_name()
-                    sender_id = event.get_sender_id()
-                    logger.warning(
-                        f"[抢断机制] 检测到{sender_name}({sender_id})已完成解析，当前会话的解析任务取消"
-                    )
-                return
-
         seg1 = chain[0]
         text = event.message_str
 
-        # 解析Json组件
+        # 卡片解析：解析Json组件，提取URL
         if isinstance(seg1, Json):
             text = extract_json_url(seg1.data)
             logger.debug(f"解析Json组件: {text}")
@@ -250,11 +246,11 @@ class ParserPlugin(Star):
 
         self_id = event.get_self_id()
 
-        # 专门@其他bot的消息不解析
+        # 指定机制：专门@其他bot的消息不解析
         if isinstance(seg1, At) and str(seg1.qq) != self_id:
             return
 
-        # 匹配 (关键词 + 正则双重判定)
+        # 核心匹配逻辑 ：关键词 + 正则双重判定，汇集了所有解析器的正则对。
         keyword: str = ""
         searched: re.Match[str] | None = None
         for kw, pat in self.key_pattern_list:
@@ -265,34 +261,25 @@ class ParserPlugin(Star):
                 break
         if searched is None:
             return
-
-        # 防抖机制
-        interval = self.config["debounce_interval"]
-        if interval:
-            link = searched.group()
-            session_history = self.link_cache.setdefault(umo, {})
-            current_time = time.time()
-
-            # 清理过期记录
-            keys_to_remove = [
-                k
-                for k, t in session_history.items()
-                if current_time - t > self.config["debounce_interval"]
-            ]
-            for k in keys_to_remove:
-                del session_history[k]
-
-            # 检查是否最近解析过
-            if link in session_history:
-                logger.warning(f"[防抖机制] 链接 {link} 在防抖时间内，跳过解析")
-                return
-
-            # 更新缓存
-            session_history[link] = current_time
-
         logger.debug(f"匹配结果: {keyword}, {searched}")
 
-        # 任务
+        # 防抖机制：避免短时间重复处理同一链接
+        link = searched.group(0)
+        if self.config["debounce_interval"] and self.debouncer.hit(umo, link):
+            logger.warning(f"[防抖] 链接 {link} 在防抖时间内，跳过解析")
+            return
+
+        # 仲裁机制：谁贴的表情ID值最小，谁来解析
+        if isinstance(event, AiocqhttpMessageEvent):
+            is_win = await self.arbiter.compete(
+                bot=event.bot,
+                message_id=int(event.message_obj.message_id),
+                self_id=int(self_id),
+            )
+            if not is_win:
+                return
+
+        # 耗时任务：解析+渲染+合并+发送
         task = asyncio.create_task(self.job(event, keyword, searched))
         self.running_tasks[umo] = task
         try:
@@ -304,7 +291,7 @@ class ParserPlugin(Star):
             self.running_tasks.pop(umo, None)
 
     async def job(self, event: AstrMessageEvent, keyword: str, searched: re.Match[str]):
-        """一个任务包：解析+渲染+合并+发送"""
+        """一个耗时的任务包：解析+渲染+合并+发送"""
         # 解析
         parse_res = await self.parser_map[keyword].parse(keyword, searched)
         # 渲染

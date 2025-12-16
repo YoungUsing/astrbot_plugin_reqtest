@@ -25,7 +25,7 @@ class AcfunParser(BaseParser):
         super().__init__(config, downloader)
         self.headers["referer"] = "https://www.acfun.cn/"
         self.cache_dir = Path(config["cache_dir"])
-        self.max_size = self.config["max_size"]
+        self.max_size = self.config["source_max_size"]
 
     @handle("acfun.cn", r"(?:ac=|/ac)(?P<acid>\d+)")
     async def _parse(self, searched: re.Match[str]):
