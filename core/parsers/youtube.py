@@ -19,7 +19,7 @@ class YouTubeParser(BaseParser):
     def __init__(self, config: AstrBotConfig, downloader: Downloader):
         super().__init__(config, downloader)
         self.ytb_cookies_file = Path(self.config["ytb_cookies_file"]) or None
-        self.max_duration = config["max_duration"]
+        self.max_duration = config["source_max_minute"] * 60
 
     @handle("youtu.be", r"https?://(?:www\.)?youtu\.be/[A-Za-z\d\._\?%&\+\-=/#]+")
     @handle(
