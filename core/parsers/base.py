@@ -83,7 +83,7 @@ class BaseParser:
         self.downloader = downloader
         # Proxy only applies to YouTube and TikTok as per configuration
         proxy_enabled_platforms = ["youtube", "tiktok"]
-        if hasattr(self.__class__, "platform") and self.__class__.platform.name in proxy_enabled_platforms:
+        if self.__class__.platform.name in proxy_enabled_platforms:
             self.proxy = config.get("proxy") or None
         else:
             self.proxy = None
