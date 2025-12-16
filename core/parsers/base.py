@@ -84,7 +84,6 @@ class BaseParser:
             self.proxy = config.get("proxy") or None
         else:
             self.proxy = None
-        
         # 每个实例拥有独立的 session
         self._session: ClientSession | None = None
         self._timeout = config["common_timeout"]
