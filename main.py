@@ -362,7 +362,7 @@ class ParserPlugin(Star):
         bvid, page_num = matched.group(1), matched.group(2)
         page_idx = int(page_num) if page_num else 0
 
-        parser: BilibiliParser = self.get_parser_by_type(BilibiliParser)  # type: ignore
+        parser: BilibiliParser = self._get_parser_by_type(BilibiliParser)  # type: ignore
 
         _, audio_url = await parser.extract_download_urls(
             bvid=bvid, page_index=page_idx
