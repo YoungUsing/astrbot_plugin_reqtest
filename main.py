@@ -2,13 +2,9 @@
 
 import asyncio
 import re
-import uuid
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 from itertools import chain
 from pathlib import Path
-
-import aiofiles
 
 from astrbot.api import logger
 from astrbot.api.event import filter
