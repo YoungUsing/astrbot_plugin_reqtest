@@ -1,4 +1,5 @@
 import asyncio
+import html
 import re
 from pathlib import Path
 from typing import Any, ClassVar
@@ -50,9 +51,11 @@ class InstagramParser(BaseParser):
                 return matched.group(1)
             return None
 
+        og_image = _match("og:image") or ""
+        og_video = _match("og:video") or ""
         return {
-            "image": _match("og:image") or "",
-            "video": _match("og:video") or "",
+            "image": self._clean_url(og_image) if og_image else "",
+            "video": self._clean_url(og_video) if og_video else "",
             "title": _match("og:title") or "",
         }
 
@@ -121,9 +124,15 @@ class InstagramParser(BaseParser):
         return [info]
 
     @staticmethod
-    def _format_url(fmt: dict[str, Any]) -> str | None:
+    def _clean_url(url: str) -> str:
+        return html.unescape(url)
+
+    @classmethod
+    def _format_url(cls, fmt: dict[str, Any]) -> str | None:
         url = fmt.get("url")
-        return url if isinstance(url, str) and url.startswith("http") else None
+        if isinstance(url, str) and url.startswith("http"):
+            return cls._clean_url(url)
+        return None
 
     @staticmethod
     def _has_video(fmt: dict[str, Any]) -> bool:
@@ -195,7 +204,7 @@ class InstagramParser(BaseParser):
         if isinstance(url, str) and url.startswith("http"):
             ext = info.get("ext")
             if ext in ("jpg", "jpeg", "png", "webp"):
-                return url
+                return InstagramParser._clean_url(url)
         thumbnails = info.get("thumbnails") or []
         best: dict[str, Any] | None = None
         for thumb in thumbnails:
@@ -211,7 +220,7 @@ class InstagramParser(BaseParser):
             new_area = (thumb.get("width") or 0) * (thumb.get("height") or 0)
             if new_area > curr_area:
                 best = thumb
-        return best.get("url") if best else None
+        return InstagramParser._clean_url(best.get("url")) if best else None
 
     @handle(
         "instagram.com",
