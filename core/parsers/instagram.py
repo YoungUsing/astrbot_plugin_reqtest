@@ -265,30 +265,6 @@ class InstagramParser(BaseParser):
     def _clean_url(url: str) -> str:
         return html.unescape(url)
 
-    @classmethod
-    def _format_url(cls, fmt: dict[str, Any]) -> str | None:
-        url = fmt.get("url")
-        if isinstance(url, str) and url.startswith("http"):
-            return cls._clean_url(url)
-        return None
-
-    @staticmethod
-    def _has_video(fmt: dict[str, Any]) -> bool:
-        return (fmt.get("vcodec") or "none") != "none"
-
-    @staticmethod
-    def _has_audio(fmt: dict[str, Any]) -> bool:
-        acodec = fmt.get("acodec") or "none"
-        return acodec not in ("none", "unknown")
-
-    @staticmethod
-    def _is_m4a(fmt: dict[str, Any]) -> bool:
-        return fmt.get("ext") == "m4a"
-
-    @staticmethod
-    def _is_direct_format(fmt: dict[str, Any]) -> bool:
-        return fmt.get("protocol") not in ("m3u8", "m3u8_native")
-
     @staticmethod
     def _extract_shortcode(url: str) -> str | None:
         path = urlparse(url).path
@@ -303,6 +279,24 @@ class InstagramParser(BaseParser):
             if val:
                 return str(val)
         return fallback
+
+    @staticmethod
+    def _entry_video_url(entry: dict[str, Any]) -> str | None:
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            return None
+        ext = entry.get("ext")
+        mime_type = entry.get("mime_type")
+        vcodec = entry.get("vcodec")
+        if vcodec not in (None, "none"):
+            return url
+        if isinstance(ext, str) and ext.lower() in {"mp4", "m4v", "webm"}:
+            return url
+        if isinstance(mime_type, str) and mime_type.startswith("video/"):
+            return url
+        if ".mp4" in url or ".m4v" in url or ".webm" in url:
+            return url
+        return None
 
     @staticmethod
     def _codec_is_none(codec: Any) -> bool:
@@ -431,58 +425,16 @@ class InstagramParser(BaseParser):
                 logger.warning("Instagram using combined format for download")
                 return combined_fmt["url"], None
 
+        direct_url = self._entry_video_url(info)
+        if direct_url:
+            logger.warning("Instagram formats missing, using direct URL download")
+            return direct_url, None
         return None, None
 
     def _merged_output_path(self, v_url: str, a_url: str) -> Path:
         digest = hashlib.md5(f"{v_url}|{a_url}".encode()).hexdigest()[:16]
         return self.downloader.cache_dir / f"{digest}.mp4"
 
-    @classmethod
-    def _pick_formats(
-        cls, info: dict[str, Any]
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        formats = info.get("formats") or []
-        video_fmt: dict[str, Any] | None = None
-        audio_fmt: dict[str, Any] | None = None
-
-        for fmt in formats:
-            if not isinstance(fmt, dict):
-                continue
-            if not cls._is_direct_format(fmt):
-                continue
-            if cls._format_url(fmt) is None:
-                continue
-
-            if cls._has_video(fmt):
-                if video_fmt is None:
-                    video_fmt = fmt
-                    continue
-                curr_height = video_fmt.get("height") or 0
-                new_height = fmt.get("height") or 0
-                if new_height > curr_height:
-                    video_fmt = fmt
-                elif new_height == curr_height:
-                    if cls._has_audio(fmt) and not cls._has_audio(video_fmt):
-                        video_fmt = fmt
-                        continue
-                    curr_tbr = video_fmt.get("tbr") or 0
-                    new_tbr = fmt.get("tbr") or 0
-                    if new_tbr > curr_tbr:
-                        video_fmt = fmt
-                continue
-
-            if cls._has_audio(fmt):
-                if audio_fmt is None:
-                    audio_fmt = fmt
-                    continue
-                if cls._is_m4a(fmt) and not cls._is_m4a(audio_fmt):
-                    audio_fmt = fmt
-                    continue
-                if cls._is_m4a(fmt) == cls._is_m4a(audio_fmt):
-                    if (fmt.get("abr") or 0) > (audio_fmt.get("abr") or 0):
-                        audio_fmt = fmt
-
-        return video_fmt, audio_fmt
 
     @handle(
         "instagram.com",
@@ -549,9 +501,12 @@ class InstagramParser(BaseParser):
         for idx, entry in enumerate(entries):
             entry_id = self._entry_identity(entry, str(idx))
             base_name = f"{base_prefix}_{entry_id}"
-            video_fmt, audio_fmt = self._pick_formats(entry)
-            video_url = self._format_url(video_fmt) if video_fmt else None
-            audio_url = self._format_url(audio_fmt) if audio_fmt else None
+            formats = entry.get("formats")
+            video_url, audio_url = self._select_media_urls(entry)
+            if not video_url and isinstance(formats, list) and formats:
+                video_fmt = self._best_av_format(formats)
+                if video_fmt:
+                    video_url = video_fmt.get("url")
             duration = float(entry.get("duration") or 0)
             if not video_url:
                 continue
