@@ -3,6 +3,7 @@ import html
 import re
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 import yt_dlp
 
@@ -86,8 +87,13 @@ class InstagramParser(BaseParser):
                 raise ParseException("获取视频信息失败") from exc
         raise ParseException("获取视频信息失败") from last_exc
 
-    async def _download_with_ytdlp(self, url: str) -> Path:
-        output_path = self.downloader.cache_dir / generate_file_name(url, ".mp4")
+    async def _download_with_ytdlp(
+        self, url: str, output_name: str | None = None
+    ) -> Path:
+        if output_name:
+            output_path = self.downloader.cache_dir / output_name
+        else:
+            output_path = self.downloader.cache_dir / generate_file_name(url, ".mp4")
         if output_path.exists():
             return output_path
         retries = 2
@@ -150,6 +156,26 @@ class InstagramParser(BaseParser):
     @staticmethod
     def _is_direct_format(fmt: dict[str, Any]) -> bool:
         return fmt.get("protocol") not in ("m3u8", "m3u8_native")
+
+    @staticmethod
+    def _extract_shortcode(url: str) -> str | None:
+        path = urlparse(url).path
+        if matched := re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)/?", path):
+            return matched.group(1)
+        return None
+
+    @staticmethod
+    def _entry_identity(entry: dict[str, Any], fallback: str) -> str:
+        for key in ("id", "display_id", "shortcode"):
+            val = entry.get(key)
+            if val:
+                return str(val)
+        return fallback
+
+    @staticmethod
+    def _url_suffix(url: str, default: str) -> str:
+        suffix = Path(urlparse(url).path).suffix
+        return suffix if suffix else default
 
     @classmethod
     def _pick_formats(
@@ -234,13 +260,21 @@ class InstagramParser(BaseParser):
         url = searched.group(0)
         final_url = await self.get_final_url(url, headers=self.headers)
         is_video_url = any(key in final_url for key in ("/reel/", "/reels/", "/tv/"))
+        shortcode = self._extract_shortcode(final_url) or self._extract_shortcode(url)
+        base_prefix = f"ig_{shortcode}" if shortcode else "ig"
         try:
             info = await self._extract_info(final_url)
         except ParseException:
             og = await self._fetch_og_meta(final_url)
             if og_image := og.get("image"):
+                image_name = (
+                    f"{base_prefix}{self._url_suffix(og_image, '.jpg')}"
+                    if shortcode
+                    else None
+                )
                 image_task = self.downloader.download_img(
                     og_image,
+                    img_name=image_name,
                     ext_headers=self.headers,
                     proxy=self.proxy,
                 )
@@ -256,7 +290,9 @@ class InstagramParser(BaseParser):
         contents = []
         meta_entry: dict[str, Any] | None = None
         fallback_video_tried = False
-        for entry in entries:
+        for idx, entry in enumerate(entries):
+            entry_id = self._entry_identity(entry, str(idx))
+            base_name = f"{base_prefix}_{entry_id}"
             video_fmt, audio_fmt = self._pick_formats(entry)
             video_url = self._format_url(video_fmt) if video_fmt else None
             audio_url = self._format_url(audio_fmt) if audio_fmt else None
@@ -268,15 +304,15 @@ class InstagramParser(BaseParser):
             if video_url:
                 cover_task = None
                 if thumbnail:
+                    cover_name = f"{base_name}_cover{self._url_suffix(thumbnail, '.jpg')}"
                     cover_task = self.downloader.download_img(
                         thumbnail,
+                        img_name=cover_name,
                         ext_headers=self.headers,
                         proxy=self.proxy,
                     )
                 if audio_url:
-                    output_path = self.downloader.cache_dir / generate_file_name(
-                        f"{video_url}|{audio_url}", ".mp4"
-                    )
+                    output_path = self.downloader.cache_dir / f"{base_name}_av.mp4"
                     if output_path.exists():
                         video_task = output_path
                     else:
@@ -291,7 +327,9 @@ class InstagramParser(BaseParser):
                 elif is_video_url and single_entry and not fallback_video_tried:
                     fallback_video_tried = True
                     try:
-                        video_task = await self._download_with_ytdlp(final_url)
+                        video_task = await self._download_with_ytdlp(
+                            final_url, f"{base_name}_ydlp.mp4"
+                        )
                         contents.append(VideoContent(video_task, cover_task, duration))
                         if meta_entry is None:
                             meta_entry = entry
@@ -301,6 +339,7 @@ class InstagramParser(BaseParser):
                 else:
                     video_task = self.downloader.download_video(
                         video_url,
+                        video_name=f"{base_name}_v.mp4",
                         ext_headers=self.headers,
                         proxy=self.proxy,
                     )
@@ -308,15 +347,19 @@ class InstagramParser(BaseParser):
             elif image_url or (is_video_url and thumbnail):
                 cover_task = None
                 if thumbnail:
+                    cover_name = f"{base_name}_cover{self._url_suffix(thumbnail, '.jpg')}"
                     cover_task = self.downloader.download_img(
                         thumbnail,
+                        img_name=cover_name,
                         ext_headers=self.headers,
                         proxy=self.proxy,
                     )
                 if is_video_url and not fallback_video_tried:
                     fallback_video_tried = True
                     try:
-                        video_task = await self._download_with_ytdlp(final_url)
+                        video_task = await self._download_with_ytdlp(
+                            final_url, f"{base_name}_ydlp.mp4"
+                        )
                         contents.append(VideoContent(video_task, cover_task, duration))
                         if meta_entry is None:
                             meta_entry = entry
@@ -324,8 +367,10 @@ class InstagramParser(BaseParser):
                     except ParseException:
                         pass
                 if image_url:
+                    image_name = f"{base_name}{self._url_suffix(image_url, '.jpg')}"
                     image_task = self.downloader.download_img(
                         image_url,
+                        img_name=image_name,
                         ext_headers=self.headers,
                         proxy=self.proxy,
                     )
@@ -344,21 +389,27 @@ class InstagramParser(BaseParser):
                     duration = float(meta.get("duration") or 0)
                     cover_task = None
                     if thumbnail:
+                        cover_name = f"{base_prefix}_cover{self._url_suffix(thumbnail, '.jpg')}"
                         cover_task = self.downloader.download_img(
                             thumbnail,
+                            img_name=cover_name,
                             ext_headers=self.headers,
                             proxy=self.proxy,
                         )
                     if isinstance(fallback_url, str) and fallback_url:
-                        video_task = await self._download_with_ytdlp(fallback_url)
+                        video_task = await self._download_with_ytdlp(
+                            fallback_url, f"{base_prefix}_ydlp.mp4"
+                        )
                         contents.append(VideoContent(video_task, cover_task, duration))
                 except ParseException:
                     pass
             if not contents:
                 image_url = self._pick_image_url(meta)
                 if isinstance(image_url, str) and image_url:
+                    image_name = f"{base_prefix}{self._url_suffix(image_url, '.jpg')}"
                     image_task = self.downloader.download_img(
                         image_url,
+                        img_name=image_name,
                         ext_headers=self.headers,
                         proxy=self.proxy,
                     )
