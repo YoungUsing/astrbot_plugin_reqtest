@@ -32,9 +32,20 @@ class InstagramParser(BaseParser):
         self._cookies_file = self._init_cookies()
 
     def _init_cookies(self) -> Path | None:
-        ig_ck = (self.config.get("ig_ck", "") or "").replace("\r", "").replace("\n", "")
-        if not ig_ck:
+        raw = (self.config.get("ig_ck", "") or "").strip()
+        if not raw:
             return None
+        cookie_path = Path(raw)
+        if cookie_path.is_file():
+            return cookie_path
+
+        if "Netscape HTTP Cookie File" in raw:
+            cookies_file = self.data_dir / "ig_cookies.txt"
+            cookies_file.parent.mkdir(parents=True, exist_ok=True)
+            cookies_file.write_text(raw, encoding="utf-8")
+            return cookies_file
+
+        ig_ck = raw.replace("\r", "").replace("\n", "")
         self.headers["Cookie"] = ig_ck
         cookies_file = self.data_dir / "ig_cookies.txt"
         cookies_file.parent.mkdir(parents=True, exist_ok=True)
