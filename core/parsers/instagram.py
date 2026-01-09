@@ -63,32 +63,53 @@ class InstagramParser(BaseParser):
             raise ParseException("gallery-dl 输出为空")
 
         urls: list[str] = []
+        errors: list[str] = []
+
+        def handle_item(item: object) -> None:
+            if isinstance(item, list):
+                if len(item) >= 2 and item[0] == -1 and isinstance(item[1], dict):
+                    message = item[1].get("message")
+                    if isinstance(message, str):
+                        errors.append(message)
+                    return
+                if (
+                    len(item) >= 3
+                    and item[0] == 3
+                    and isinstance(item[1], str)
+                ):
+                    urls.append(self._clean_url(item[1]))
+                    return
+                if len(item) >= 2 and item[0] == 3 and isinstance(item[1], dict):
+                    for key in ("url", "display_url"):
+                        val = item[1].get(key)
+                        if isinstance(val, str):
+                            urls.append(self._clean_url(val))
+                            return
+            if isinstance(item, dict):
+                for key in ("url", "display_url"):
+                    val = item.get(key)
+                    if isinstance(val, str):
+                        urls.append(self._clean_url(val))
+                        return
+
         try:
             data = json.loads(text)
             if isinstance(data, list):
                 for item in data:
-                    if (
-                        isinstance(item, list)
-                        and len(item) >= 3
-                        and item[0] == 3
-                        and isinstance(item[1], str)
-                    ):
-                        urls.append(self._clean_url(item[1]))
+                    handle_item(item)
+            else:
+                handle_item(data)
         except json.JSONDecodeError:
             for line in text.splitlines():
                 try:
                     item = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (
-                    isinstance(item, list)
-                    and len(item) >= 3
-                    and item[0] == 3
-                    and isinstance(item[1], str)
-                ):
-                    urls.append(self._clean_url(item[1]))
+                handle_item(item)
 
         if not urls:
+            if errors:
+                raise ParseException(f"gallery-dl 解析失败: {errors[0]}")
             raise ParseException("gallery-dl 未返回图片链接")
         return urls
 
