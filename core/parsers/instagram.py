@@ -7,7 +7,7 @@ import yt_dlp
 
 from astrbot.core.config.astrbot_config import AstrBotConfig
 
-from ..data import Platform, VideoContent
+from ..data import ImageContent, Platform, VideoContent
 from ..download import Downloader
 from ..exception import ParseException
 from ..utils import generate_file_name, safe_unlink, save_cookies_with_netscape
@@ -37,44 +37,45 @@ class InstagramParser(BaseParser):
         return cookies_file
 
     async def _extract_info(self, url: str) -> dict[str, Any]:
+        retries = 2
         last_exc: Exception | None = None
-        proxy_steps = (True, False) if self.proxy else (False,)
-        for use_proxy in proxy_steps:
-            opts: dict[str, Any] = {"quiet": True, "skip_download": True}
-            if use_proxy:
-                opts["proxy"] = self.proxy
-            if self._cookies_file and self._cookies_file.is_file():
-                opts["cookiefile"] = str(self._cookies_file)
+        opts: dict[str, Any] = {"quiet": True, "skip_download": True}
+        if self.proxy:
+            opts["proxy"] = self.proxy
+        if self._cookies_file and self._cookies_file.is_file():
+            opts["cookiefile"] = str(self._cookies_file)
+        for attempt in range(retries + 1):
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     raw = await asyncio.to_thread(ydl.extract_info, url, download=False)
+                if not isinstance(raw, dict):
+                    raise ParseException("获取视频信息失败")
+                return raw
             except Exception as exc:
                 last_exc = exc
-                if use_proxy:
+                if attempt < retries:
+                    await asyncio.sleep(1 + attempt)
                     continue
-                raise
-            if not isinstance(raw, dict):
-                raise ParseException("获取视频信息失败")
-            return raw
+                raise ParseException("获取视频信息失败") from exc
         raise ParseException("获取视频信息失败") from last_exc
 
     async def _download_with_ytdlp(self, url: str) -> Path:
         output_path = self.downloader.cache_dir / generate_file_name(url, ".mp4")
         if output_path.exists():
             return output_path
+        retries = 2
         last_exc: Exception | None = None
-        proxy_steps = (True, False) if self.proxy else (False,)
-        for use_proxy in proxy_steps:
-            opts: dict[str, Any] = {
-                "quiet": True,
-                "outtmpl": str(output_path),
-                "merge_output_format": "mp4",
-                "format": "best[height<=720]/bestvideo[height<=720]+bestaudio/best",
-            }
-            if use_proxy:
-                opts["proxy"] = self.proxy
-            if self._cookies_file and self._cookies_file.is_file():
-                opts["cookiefile"] = str(self._cookies_file)
+        opts: dict[str, Any] = {
+            "quiet": True,
+            "outtmpl": str(output_path),
+            "merge_output_format": "mp4",
+            "format": "best[height<=720]/bestvideo[height<=720]+bestaudio/best",
+        }
+        if self.proxy:
+            opts["proxy"] = self.proxy
+        if self._cookies_file and self._cookies_file.is_file():
+            opts["cookiefile"] = str(self._cookies_file)
+        for attempt in range(retries + 1):
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     await asyncio.to_thread(ydl.download, [url])
@@ -82,9 +83,10 @@ class InstagramParser(BaseParser):
             except Exception as exc:
                 last_exc = exc
                 await safe_unlink(output_path)
-                if use_proxy:
+                if attempt < retries:
+                    await asyncio.sleep(1 + attempt)
                     continue
-                raise
+                raise ParseException("下载失败") from exc
         raise ParseException("下载失败") from last_exc
 
     @staticmethod
@@ -163,6 +165,30 @@ class InstagramParser(BaseParser):
 
         return video_fmt, audio_fmt
 
+    @staticmethod
+    def _pick_image_url(info: dict[str, Any]) -> str | None:
+        url = info.get("url")
+        if isinstance(url, str) and url.startswith("http"):
+            ext = info.get("ext")
+            if ext in ("jpg", "jpeg", "png", "webp"):
+                return url
+        thumbnails = info.get("thumbnails") or []
+        best: dict[str, Any] | None = None
+        for thumb in thumbnails:
+            if not isinstance(thumb, dict):
+                continue
+            t_url = thumb.get("url")
+            if not isinstance(t_url, str) or not t_url.startswith("http"):
+                continue
+            if best is None:
+                best = thumb
+                continue
+            curr_area = (best.get("width") or 0) * (best.get("height") or 0)
+            new_area = (thumb.get("width") or 0) * (thumb.get("height") or 0)
+            if new_area > curr_area:
+                best = thumb
+        return best.get("url") if best else None
+
     @handle(
         "instagram.com",
         r"https?://(?:www\.)?instagram\.com/(?:p|reel|reels|tv|share)/[A-Za-z0-9._?%&=+\-/#]+",
@@ -183,39 +209,48 @@ class InstagramParser(BaseParser):
             video_fmt, audio_fmt = self._pick_formats(entry)
             video_url = self._format_url(video_fmt) if video_fmt else None
             audio_url = self._format_url(audio_fmt) if audio_fmt else None
-            if not video_url:
+            image_url = None if video_url else self._pick_image_url(entry)
+            if not video_url and not image_url:
                 continue
             thumbnail = entry.get("thumbnail")
             duration = float(entry.get("duration") or 0)
-            cover_task = None
-            if thumbnail:
-                cover_task = self.downloader.download_img(
-                    thumbnail,
-                    ext_headers=self.headers,
-                    proxy=self.proxy,
-                )
-            if audio_url and video_fmt and not self._has_audio(video_fmt):
-                output_path = self.downloader.cache_dir / generate_file_name(
-                    video_url, ".mp4"
-                )
-                if output_path.exists():
-                    video_task = output_path
-                else:
-                    video_task = self.downloader.download_av_and_merge(
-                        video_url,
-                        audio_url,
-                        output_path=output_path,
+            if video_url:
+                cover_task = None
+                if thumbnail:
+                    cover_task = self.downloader.download_img(
+                        thumbnail,
                         ext_headers=self.headers,
                         proxy=self.proxy,
                     )
-                contents.append(VideoContent(video_task, cover_task, duration))
-            else:
-                video_task = self.downloader.download_video(
-                    video_url,
+                if audio_url and video_fmt and not self._has_audio(video_fmt):
+                    output_path = self.downloader.cache_dir / generate_file_name(
+                        video_url, ".mp4"
+                    )
+                    if output_path.exists():
+                        video_task = output_path
+                    else:
+                        video_task = self.downloader.download_av_and_merge(
+                            video_url,
+                            audio_url,
+                            output_path=output_path,
+                            ext_headers=self.headers,
+                            proxy=self.proxy,
+                        )
+                    contents.append(VideoContent(video_task, cover_task, duration))
+                else:
+                    video_task = self.downloader.download_video(
+                        video_url,
+                        ext_headers=self.headers,
+                        proxy=self.proxy,
+                    )
+                    contents.append(VideoContent(video_task, cover_task, duration))
+            elif image_url:
+                image_task = self.downloader.download_img(
+                    image_url,
                     ext_headers=self.headers,
                     proxy=self.proxy,
                 )
-                contents.append(VideoContent(video_task, cover_task, duration))
+                contents.append(ImageContent(image_task))
             if meta_entry is None:
                 meta_entry = entry
 

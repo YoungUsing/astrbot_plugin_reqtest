@@ -117,14 +117,12 @@ class Downloader:
         if proxy is ...:
             proxy = self.proxy
 
-        proxies = [proxy]
-        if proxy is not None:
-            proxies.append(None)
-
-        for idx, current_proxy in enumerate(proxies):
+        retries = 2
+        last_exc: Exception | None = None
+        for attempt in range(retries + 1):
             try:
                 async with self.client.get(
-                    url, headers=headers, allow_redirects=True, proxy=current_proxy
+                    url, headers=headers, allow_redirects=True, proxy=proxy
                 ) as response:
                     if response.status >= 400:
                         raise ClientError(f"HTTP {response.status} {response.reason}")
@@ -149,12 +147,18 @@ class Downloader:
                                 bar.update(len(chunk))
 
                 return file_path
-            except ClientError as exc:
+            except (ZeroSizeException, SizeLimitException):
                 await safe_unlink(file_path)
-                if current_proxy is not None and idx == 0:
+                raise
+            except (ClientError, asyncio.TimeoutError) as exc:
+                last_exc = exc
+                await safe_unlink(file_path)
+                if attempt < retries:
+                    await asyncio.sleep(1 + attempt)
                     continue
                 logger.exception(f"下载失败 | url: {url}, file_path: {file_path}")
                 raise DownloadException("媒体下载失败") from exc
+        raise DownloadException("媒体下载失败") from last_exc
 
     @staticmethod
     def get_progress_bar(desc: str, total: int | None = None) -> tqdm:
