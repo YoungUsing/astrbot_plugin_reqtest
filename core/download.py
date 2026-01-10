@@ -1,5 +1,4 @@
-import asyncio
-from asyncio import Task, create_task
+from asyncio import Task, TimeoutError, create_task, gather, sleep, to_thread
 from collections.abc import Callable, Coroutine
 from functools import wraps
 from pathlib import Path
@@ -117,35 +116,57 @@ class Downloader:
         if proxy is ...:
             proxy = self.proxy
 
-        try:
-            async with self.client.get(
-                url, headers=headers, allow_redirects=True, proxy=proxy
-            ) as response:
-                if response.status >= 400:
-                    raise ClientError(f"HTTP {response.status} {response.reason}")
-                content_length = response.headers.get("Content-Length")
-                content_length = int(content_length) if content_length else 0
+        retries = 2
+        for attempt in range(retries + 1):
+            try:
+                async with self.client.get(
+                    url, headers=headers, allow_redirects=True, proxy=proxy
+                ) as response:
+                    if response.status >= 400:
+                        raise ClientError(f"HTTP {response.status} {response.reason}")
+                    content_length = response.content_length
+                    max_bytes = self.max_size * 1024 * 1024
 
-                if content_length == 0:
-                    logger.warning(f"媒体 url: {url}, 大小为 0, 取消下载")
-                    raise ZeroSizeException
-                if (file_size := content_length / 1024 / 1024) > self.max_size:
-                    logger.warning(
-                        f"媒体 url: {url} 大小 {file_size:.2f} MB 超过 {self.max_size} MB, 取消下载"
-                    )
-                    raise SizeLimitException
+                    if content_length == 0:
+                        logger.warning(f"媒体 url: {url}, 大小为 0, 取消下载")
+                        raise ZeroSizeException
+                    if content_length and content_length > max_bytes:
+                        logger.warning(
+                            f"媒体 url: {url} 大小 {content_length / 1024 / 1024:.2f} MB 超过 {self.max_size} MB, 取消下载"
+                        )
+                        raise SizeLimitException
 
-                with self.get_progress_bar(file_name, content_length) as bar:
-                    async with aiofiles.open(file_path, "wb") as file:
-                        async for chunk in response.content.iter_chunked(1024 * 1024):
-                            await file.write(chunk)
-                            bar.update(len(chunk))
+                    downloaded = 0
+                    with self.get_progress_bar(file_name, content_length) as bar:
+                        async with aiofiles.open(file_path, "wb") as file:
+                            async for chunk in response.content.iter_chunked(
+                                1024 * 1024
+                            ):
+                                downloaded += len(chunk)
+                                if downloaded > max_bytes:
+                                    raise SizeLimitException
+                                await file.write(chunk)
+                                bar.update(len(chunk))
 
-        except ClientError:
-            await safe_unlink(file_path)
-            logger.exception(f"下载失败 | url: {url}, file_path: {file_path}")
-            raise DownloadException("媒体下载失败")
-        return file_path
+                    if downloaded == 0:
+                        logger.warning(f"媒体 url: {url}, 实际大小为 0, 取消下载")
+                        raise ZeroSizeException
+                    if content_length and downloaded < content_length:
+                        raise ClientError(
+                            f"HTTP payload incomplete {downloaded}/{content_length}"
+                        )
+
+                return file_path
+            except (ZeroSizeException, SizeLimitException):
+                await safe_unlink(file_path)
+                raise
+            except (ClientError, TimeoutError) as exc:
+                await safe_unlink(file_path)
+                if attempt < retries:
+                    await sleep(1 + attempt)
+                    continue
+                logger.exception(f"下载失败 | url: {url}, file_path: {file_path}")
+                raise DownloadException("媒体下载失败") from exc
 
     @staticmethod
     def get_progress_bar(desc: str, total: int | None = None) -> tqdm:
@@ -310,7 +331,7 @@ class Downloader:
         Returns:
             list[Path]: image file paths
         """
-        paths_or_errs = await asyncio.gather(
+        paths_or_errs = await gather(
             *[
                 self.download_img(url, ext_headers=ext_headers, proxy=proxy)
                 for url in urls
@@ -341,7 +362,7 @@ class Downloader:
         Returns:
             Path: merged file path
         """
-        v_path, a_path = await asyncio.gather(
+        v_path, a_path = await gather(
             self.download_video(v_url, ext_headers=ext_headers, proxy=proxy),
             self.download_audio(a_url, ext_headers=ext_headers, proxy=proxy),
         )
@@ -366,7 +387,7 @@ class Downloader:
         if cookiefile and cookiefile.is_file():
             opts["cookiefile"] = str(cookiefile)
         with yt_dlp.YoutubeDL(opts) as ydl:
-            raw = await asyncio.to_thread(ydl.extract_info, url, download=False)
+            raw = await to_thread(ydl.extract_info, url, download=False)
             if not raw:
                 raise ParseException("获取视频信息失败")
         info = convert(raw, VideoInfo)
@@ -400,7 +421,7 @@ class Downloader:
             opts["cookiefile"] = str(cookiefile)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
-            await asyncio.to_thread(ydl.download, [url])
+            await to_thread(ydl.download, [url])
         return video_path
 
     async def _ytdlp_download_audio(self, url: str, cookiefile: Path | None) -> Path:
@@ -427,7 +448,7 @@ class Downloader:
             opts["cookiefile"] = str(cookiefile)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
-            await asyncio.to_thread(ydl.download, [url])
+            await to_thread(ydl.download, [url])
         return audio_path
 
     async def close(self):

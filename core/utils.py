@@ -71,6 +71,11 @@ async def merge_av(
         a_path (Path): 音频文件路径
         output_path (Path): 输出文件路径
     """
+    target_path = output_path
+    if output_path in (v_path, a_path):
+        output_path = output_path.with_name(
+            f"{output_path.stem}_merged{output_path.suffix}"
+        )
     logger.info(f"Merging {v_path.name} and {a_path.name} to {output_path.name}")
 
     cmd = [
@@ -90,7 +95,12 @@ async def merge_av(
     ]
 
     await exec_ffmpeg_cmd(cmd)
-    await asyncio.gather(safe_unlink(v_path), safe_unlink(a_path))
+    if output_path != target_path:
+        await safe_unlink(target_path)
+        await asyncio.to_thread(output_path.replace, target_path)
+        output_path = target_path
+    cleanup = [p for p in (v_path, a_path) if p != output_path]
+    await asyncio.gather(*(safe_unlink(p) for p in cleanup))
     logger.info(f"Merged {output_path.name}, {fmt_size(output_path)}")
 
 
@@ -287,4 +297,3 @@ def extract_json_url(data: dict | str) -> str | None:
         if url := meta.get(key1, {}).get(key2):
             return url
     return None
-

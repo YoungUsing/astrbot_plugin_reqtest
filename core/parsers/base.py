@@ -1,7 +1,7 @@
 """Parser 基类定义"""
 
 from abc import ABC
-from asyncio import Task
+from asyncio import Task, TimeoutError, sleep
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from re import Match, Pattern, compile
@@ -79,8 +79,8 @@ class BaseParser:
         self.config = config
         self.data_dir = Path(config["data_dir"])
         self.downloader = downloader
-        # Proxy only applies to YouTube and TikTok as per configuration
-        proxy_enabled_platforms = ["youtube", "tiktok"]
+        # Proxy only applies to platforms: youtube, tiktok, instagram (as per configuration)
+        proxy_enabled_platforms = ["youtube", "tiktok", "instagram"]
         if self.__class__.platform.name in proxy_enabled_platforms:
             self.proxy = config.get("proxy") or None
         else:
@@ -179,14 +179,23 @@ class BaseParser:
         headers: dict[str, str] | None = None,
     ) -> str:
         """获取重定向后的 URL, 单次重定向"""
-
         headers = headers or COMMON_HEADER.copy()
-        async with self.client.get(
-            url, headers=headers, allow_redirects=False, proxy=self.proxy
-        ) as resp:
-            if resp.status >= 400:
-                raise ClientError(f"redirect check {resp.status} {resp.reason}")
-            return resp.headers.get("Location", url)
+        retries = 2
+        for attempt in range(retries + 1):
+            try:
+                async with self.client.get(
+                    url, headers=headers, allow_redirects=False, proxy=self.proxy
+                ) as resp:
+                    if resp.status >= 400:
+                        raise ClientError(
+                            f"redirect check {resp.status} {resp.reason}"
+                        )
+                    return resp.headers.get("Location", url)
+            except (ClientError, TimeoutError) as exc:
+                if attempt < retries:
+                    await sleep(1 + attempt)
+                    continue
+                raise
 
     async def get_final_url(
         self,
@@ -195,12 +204,20 @@ class BaseParser:
     ) -> str:
         """获取重定向后的 URL, 允许多次重定向"""
         headers = headers or COMMON_HEADER.copy()
-        async with self.client.get(
-            url, headers=headers, allow_redirects=True, proxy=self.proxy
-        ) as resp:
-            if resp.status >= 400:
-                raise ClientError(f"final url check {resp.status} {resp.reason}")
-            return str(resp.url)
+        retries = 2
+        for attempt in range(retries + 1):
+            try:
+                async with self.client.get(
+                    url, headers=headers, allow_redirects=True, proxy=self.proxy
+                ) as resp:
+                    if resp.status >= 400:
+                        raise ClientError(f"final url check {resp.status} {resp.reason}")
+                    return str(resp.url)
+            except (ClientError, TimeoutError) as exc:
+                if attempt < retries:
+                    await sleep(1 + attempt)
+                    continue
+                raise
 
     def create_author(
         self,
