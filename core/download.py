@@ -85,9 +85,7 @@ class Downloader:
         headers: dict[str, str] | None = None,
         proxy: str | None | object = ...,
     ) -> Path:
-        """
-        download file by url with stream
-        """
+        """流式下载"""
         if not file_name:
             file_name = generate_file_name(url)
         file_path = self.cfg.cache_dir / file_name
@@ -178,10 +176,10 @@ class Downloader:
         headers: dict[str, str] | None = None,
         use_ytdlp: bool = False,
         cookiefile: Path | None = None,
-        proxy: str | None | object = ...,
+        proxy: str | None  = None,
     ) -> Path:
         if use_ytdlp:
-            return await self._ytdlp_download_video(url, cookiefile)
+            return await self._ytdlp_download_video(url, cookiefile, headers, proxy)
 
         if video_name is None:
             video_name = generate_file_name(url, ".mp4")
@@ -198,10 +196,10 @@ class Downloader:
         headers: dict[str, str] | None = None,
         use_ytdlp: bool = False,
         cookiefile: Path | None = None,
-        proxy: str | None | object = ...,
+        proxy: str | None = None,
     ) -> Path:
         if use_ytdlp:
-            return await self._ytdlp_download_audio(url, cookiefile)
+            return await self._ytdlp_download_audio(url, cookiefile, headers, proxy)
 
         if audio_name is None:
             audio_name = generate_file_name(url, ".mp3")
@@ -263,7 +261,7 @@ class Downloader:
         *,
         output_path: Path,
         headers: dict[str, str] | None = None,
-        proxy: str | None | object = ...,
+        proxy: str | None = None,
     ) -> Path:
         """
         download video and audio file by url with stream and merge
