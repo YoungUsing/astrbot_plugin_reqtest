@@ -15,7 +15,7 @@ class TikTokParser(BaseParser):
         super().__init__(config, downloader)
         self.mycfg = config.parser.tiktok
 
-    @handle("tiktok.com", r"(?:https?://)?(www|vt|vm)\.tiktok\.com/[A-Za-z0-9._?%&+\-=/#@]*")
+    @handle("tiktok.com", r"(www|vt|vm)\.tiktok\.com/[A-Za-z0-9._?%&+\-=/#@]*")
     async def _parse(self, searched: re.Match[str]):
         # 从匹配对象中获取原始URL
         url, prefix = searched.group(0), searched.group(1)
