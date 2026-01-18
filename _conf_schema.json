@@ -151,7 +151,7 @@
                     },
                     "cookies": {
                         "description": "Bilibili Cookies",
-                        "hint": "用于解析的登录Cookies，留空则使用无登录状态",
+                        "hint": "选填, 用于解析的登录Cookies，留空则使用无登录状态",
                         "type": "text",
                         "default": ""
                     },
@@ -162,7 +162,7 @@
                     },
                     "video_codecs": {
                         "description": "B站视频编码",
-                        "hint": "优先下载的编码类型，可选：AVC、AV1、HEV",
+                        "hint": "优先下载的编码类型，可选：AVC、AV1、HEV。推荐用兼容性较好的AVC",
                         "type": "string",
                         "options": [
                             "AVC",
@@ -173,7 +173,7 @@
                     },
                     "video_quality": {
                         "description": "B站视频分辨率",
-                        "hint": "下载B站视频的分辨率",
+                        "hint": "下载B站视频的分辨率, 高画质可能需要登录才能下载成功",
                         "type": "string",
                         "options": [
                             "_360P",
@@ -202,7 +202,7 @@
                     },
                     "cookies": {
                         "description": "抖音 Cookies",
-                        "hint": "用于解析的登录Cookies，留空则使用无登录状态",
+                        "hint": "选填, 用于解析的登录Cookies，留空则使用无登录状态。经常下载失败时可以试着填一下",
                         "type": "text",
                         "default": ""
                     },
@@ -283,7 +283,7 @@
                     },
                     "cookies": {
                         "description": "油管 Cookies",
-                        "hint": "用于YouTube解析的登录Cookies，留空则使用无登录状态",
+                        "hint": "必填！！用于YouTube解析的登录Cookies，不填一般无法成功下载油管的视频，同时注意油管Cookie有效期较短",
                         "type": "text",
                         "default": ""
                     },
