@@ -392,7 +392,7 @@ class Downloader:
     async def _ytdlp_download_video(
         self, url: str, cookiefile: Path | None = None, proxy: str | None = None
     ) -> Path:
-        info = await self.ytdlp_extract_info(url, cookiefile)
+        info = await self.ytdlp_extract_info(url, cookiefile, proxy)
         if info.duration > self.cfg.max_duration:
             raise DurationLimitException
 
